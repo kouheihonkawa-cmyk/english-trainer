@@ -1,7 +1,8 @@
 // オフライン対応: 初回にアプリ本体をキャッシュ
-const CACHE = "eng-trainer-v1";
+// ※ 中身(data.js等)を更新したら、この番号を必ず上げること(v2, v3...)
+const CACHE = "eng-trainer-v2";
 const ASSETS = [
-  "index.html", "styles.css", "data.js", "srs.js", "app.js", "manifest.json"
+  "./", "index.html", "styles.css", "data.js", "srs.js", "app.js", "manifest.json"
 ];
 
 self.addEventListener("install", e=>{
