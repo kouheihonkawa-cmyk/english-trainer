@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#0f1420">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>English Trainer</title>
+<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>English Trainer</h1>
+      <span class="pill" id="dateNow"></span>
+    </header>
+    <main id="app"></main>
+  </div>
+
+  <nav>
+    <button data-v="home" class="on"><span class="ic">🏠</span>ホーム</button>
+    <button data-v="study"><span class="ic">📖</span>学習</button>
+    <button data-v="listen"><span class="ic">🎧</span>聞き流し</button>
+    <button data-v="settings"><span class="ic">⚙️</span>設定</button>
+  </nav>
+
+  <script src="data.js"></script>
+  <script src="srs.js"></script>
+  <script src="app.js"></script>
+  <script>
+    // 日付表示
+    document.getElementById("dateNow").textContent =
+      new Date().toLocaleDateString("ja-JP",{month:"short",day:"numeric",weekday:"short"});
+    // Service Worker (オフライン対応)
+    if("serviceWorker" in navigator){
+      navigator.serviceWorker.register("sw.js").catch(()=>{});
+    }
+  </script>
+</body>
+</html>
