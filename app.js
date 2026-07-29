@@ -11,6 +11,24 @@ const CARDS = [
 ];
 const CARD_BY_ID = Object.fromEntries(CARDS.map(c => [c.id, c]));
 
+// 品詞コード → 日本語ラベル
+const POS_JP = {
+  "v.":"動詞", "n.":"名詞", "adj.":"形容詞", "adv.":"副詞",
+  "phr.":"熟語", "prep.":"前置詞", "conj.":"接続詞", "pron.":"代名詞",
+  "v./n.":"動詞・名詞", "n./v.":"名詞・動詞", "adj./n.":"形容詞・名詞", "adj./adv.":"形容詞・副詞",
+};
+function posJP(pos){ return POS_JP[pos] || pos || ""; }
+
+// カードの例文を配列 [{en,jp}, ...] で返す (単語は最大2つ、表現は元の配列)
+function examplesOf(card){
+  if(card.type === "expr") return card.examples || [];
+  const out = [];
+  if(card.ex) out.push({ en:card.ex, jp:card.exJp });
+  const e2 = (typeof EX2 !== "undefined") ? EX2[card.id] : null;
+  if(e2) out.push(e2);
+  return out;
+}
+
 // ---- 保存データ ----
 let DB = load();
 
@@ -220,25 +238,21 @@ function renderStudy(){
 
   const front = card.type==="vocab"
     ? `<div class="kicker">${isNew?"新しい単語":"単語"}</div>
-       <div class="term">${card.term}</div><div class="pos">${card.pos}</div>`
+       <div class="term">${card.term}</div><div class="pos">${posJP(card.pos)}</div>`
     : `<div class="kicker">${isNew?"新しい表現":"表現"}</div>
        <div class="frame">${card.frame}</div>`;
 
+  const exList = examplesOf(card);
   let backHtml = "";
   if(session.revealed){
-    backHtml = card.type==="vocab"
-      ? `<div class="divider"></div>
+    const exHtml = exList.slice(0,2).map(e=>
+      `<div class="ex"><span class="en">${card.type==="vocab"?boldTerm(e.en,card.term):e.en}</span><br><span class="exjp">${e.jp}</span></div>`
+    ).join("");
+    backHtml = `<div class="divider"></div>
          <div class="answer">
            <div class="jp">${card.jp}</div>
-           <div class="ex"><span class="en">${boldTerm(card.ex, card.term)}</span></div>
-           <div class="ex exjp">${card.exJp}</div>
-           <button class="speak" id="sp">🔊</button>
-         </div>`
-      : `<div class="divider"></div>
-         <div class="answer">
-           <div class="jp">${card.jp}</div>
-           ${card.examples.map(e=>`<div class="ex"><span class="en">${e.en}</span><br><span class="exjp">${e.jp}</span></div>`).join("")}
-           <div class="note">${card.note}</div>
+           ${exHtml}
+           ${card.type==="expr" ? `<div class="note">${card.note}</div>` : ""}
            <button class="speak" id="sp">🔊</button>
          </div>`;
   }
@@ -267,16 +281,15 @@ function renderStudy(){
 
   if(!session.revealed){
     document.getElementById("reveal").onclick = ()=>{ session.revealed=true; renderStudy();
-      // 答え表示時に例文を読む
-      if(DB.settings.autoSpeak){
-        const t = card.type==="vocab"? card.ex : card.examples[0].en;
-        speak(t,"en");
+      // 答え表示時に例文(1つ目)を読む
+      if(DB.settings.autoSpeak && exList[0]){
+        speak(exList[0].en,"en");
       }
     };
   }else{
-    document.getElementById("sp").onclick = ()=>{
-      const t = card.type==="vocab"? card.ex : card.examples.map(e=>e.en).join(". ");
-      speak(t,"en");
+    document.getElementById("sp").onclick = async ()=>{
+      // 2つの例文を順に読む
+      for(const e of exList.slice(0,2)){ await speak(e.en,"en"); await wait(500); }
     };
     document.querySelectorAll(".grades button").forEach(b=>{
       b.onclick = ()=> grade(card, parseInt(b.dataset.g));
@@ -358,15 +371,15 @@ function renderListen(){
 
 function drawListen(){
   const card = listenState.queue[listenState.idx];
-  const body = card.type==="vocab"
-    ? `<div class="term">${card.term}</div>
-       <div class="jp">${card.jp}</div>
-       <div class="ex">${boldTerm(card.ex, card.term)}</div>
-       <div class="ex exjp">${card.exJp}</div>`
+  const head = card.type==="vocab"
+    ? `<div class="term">${card.term}</div><div class="pos">${posJP(card.pos)}</div>
+       <div class="jp">${card.jp}</div>`
     : `<div class="frame" style="font-size:30px">${card.frame}</div>
-       <div class="jp">${card.jp}</div>
-       <div class="ex">${card.examples[0].en}</div>
-       <div class="ex exjp">${card.examples[0].jp}</div>`;
+       <div class="jp">${card.jp}</div>`;
+  const exHtml = examplesOf(card).slice(0,2).map(e=>
+    `<div class="ex">${card.type==="vocab"?boldTerm(e.en,card.term):e.en}<br><span class="exjp">${e.jp}</span></div>`
+  ).join("");
+  const body = head + exHtml;
   app.innerHTML = `
     <div class="listen">
       ${body}
@@ -394,14 +407,12 @@ async function playCurrent(){
   const gap = (DB.settings.listenGap||1.4)*1000;
   while(listenState.playing && listenState.idx < listenState.queue.length){
     const card = listenState.queue[listenState.idx];
-    if(card.type==="vocab"){
-      await speak(card.term,"en"); if(!listenState.playing) return; await wait(gap*0.5);
-      await speak(card.jp,"ja"); if(!listenState.playing) return; await wait(gap*0.4);
-      await speak(card.ex,"en"); if(!listenState.playing) return; await wait(gap);
-    }else{
-      await speak(stripSlot(card.frame),"en"); if(!listenState.playing) return; await wait(gap*0.5);
-      await speak(card.jp,"ja"); if(!listenState.playing) return; await wait(gap*0.4);
-      await speak(card.examples[0].en,"en"); if(!listenState.playing) return; await wait(gap);
+    const headEn = card.type==="vocab" ? card.term : stripSlot(card.frame);
+    const exs = examplesOf(card).slice(0,2);
+    await speak(headEn,"en");        if(!listenState.playing) return; await wait(gap*0.5);
+    await speak(card.jp,"ja");        if(!listenState.playing) return; await wait(gap*0.4);
+    for(const e of exs){
+      await speak(e.en,"en");         if(!listenState.playing) return; await wait(gap*0.7);
     }
     if(!listenState.playing) return;
     if(listenState.idx < listenState.queue.length-1){
