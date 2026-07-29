@@ -158,7 +158,7 @@ let session = null;   // 学習セッション状態
 
 function go(view){
   stopSpeak();
-  if(listenTimer){ listenState.playing=false; }
+  stopListenPlayback();
   VIEW = view;
   document.querySelectorAll("nav button").forEach(b=> b.classList.toggle("on", b.dataset.v===view));
   render();
@@ -351,13 +351,28 @@ function markStreak(){
 }
 
 // ============================================================
-//  聞き流しモード (ハンズフリー自動再生)
+//  聞き流しモード (音声ファイル + バックグラウンド/ロック画面再生)
+//  ※ 音声ファイルが無い時は端末読み上げにフォールバック(背景再生不可)
 // ============================================================
 let listenState = { queue:[], idx:0, playing:false };
-let listenTimer = null;
+let listenAudio = null;
+let curPlayId = 0;      // next/prev や停止で古い再生を無効化
+
+function getAudioEl(){
+  if(!listenAudio){ listenAudio = new Audio(); listenAudio.preload = "auto"; }
+  return listenAudio;
+}
+function audioSrc(id){ return "audio/" + id + ".mp3"; }
+
+function stopListenPlayback(){
+  listenState.playing = false;
+  curPlayId++;
+  if(listenAudio) listenAudio.pause();
+  stopSpeak();
+  if("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
+}
 
 function renderListen(){
-  // キュー = 期限復習 + 新規 + それでも足りなければ開始済み
   const q = buildQueue();
   let queue = [...q.due, ...q.fresh];
   if(queue.length < 5){
@@ -379,48 +394,84 @@ function drawListen(){
   const exHtml = examplesOf(card).slice(0,2).map(e=>
     `<div class="ex">${card.type==="vocab"?boldTerm(e.en,card.term):e.en}<br><span class="exjp">${e.jp}</span></div>`
   ).join("");
-  const body = head + exHtml;
   app.innerHTML = `
     <div class="listen">
-      ${body}
+      ${head}${exHtml}
       <div class="listen-controls">
         <button class="lc" id="prev">⏮</button>
         <button class="lc main" id="play">${listenState.playing?"⏸":"▶"}</button>
         <button class="lc" id="next">⏭</button>
       </div>
       <div class="muted" style="margin-top:16px">${listenState.idx+1} / ${listenState.queue.length}</div>
-      <div class="muted" style="font-size:12px;max-width:280px">画面を消すと停止します(端末の仕様)。再生中は画面をつけたままにしてください。</div>
+      <div class="muted" style="font-size:12px;max-width:300px">🔒 画面を消しても・他アプリ中でも再生が続きます。ロック画面で操作できます。</div>
     </div>`;
   document.getElementById("play").onclick = toggleListen;
-  document.getElementById("next").onclick = ()=>{ stopSpeak(); listenState.idx=Math.min(listenState.queue.length-1,listenState.idx+1); drawListen(); if(listenState.playing) playCurrent(); };
-  document.getElementById("prev").onclick = ()=>{ stopSpeak(); listenState.idx=Math.max(0,listenState.idx-1); drawListen(); if(listenState.playing) playCurrent(); };
+  document.getElementById("next").onclick = ()=> gotoListen(1);
+  document.getElementById("prev").onclick = ()=> gotoListen(-1);
 }
 
 function toggleListen(){
-  listenState.playing = !listenState.playing;
-  drawListen();
-  if(listenState.playing) playCurrent();
-  else stopSpeak();
+  if(listenState.playing){
+    stopListenPlayback();
+    drawListen();
+  }else{
+    listenState.playing = true;
+    playIdx();
+  }
 }
 
-async function playCurrent(){
+function gotoListen(delta){
+  if(listenAudio) listenAudio.pause();
+  stopSpeak();
+  curPlayId++;
+  listenState.idx = Math.min(listenState.queue.length-1, Math.max(0, listenState.idx+delta));
+  drawListen();
+  if(listenState.playing) playIdx();
+}
+
+function playIdx(){
+  const card = listenState.queue[listenState.idx];
+  const myId = ++curPlayId;
+  drawListen();
+  setMediaSession(card);
+  if("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+  const a = getAudioEl();
+  a.onended = ()=>{ if(myId!==curPlayId || !listenState.playing) return; advanceListen(); };
+  a.onerror = ()=>{ if(myId!==curPlayId || !listenState.playing) return; fallbackSpeak(card, myId); };
+  a.src = audioSrc(card.id);
+  a.currentTime = 0;
+  const p = a.play();
+  if(p && p.catch) p.catch(()=>{ if(myId!==curPlayId || !listenState.playing) return; fallbackSpeak(card, myId); });
+}
+
+function advanceListen(){
   const gap = (DB.settings.listenGap||1.4)*1000;
-  while(listenState.playing && listenState.idx < listenState.queue.length){
-    const card = listenState.queue[listenState.idx];
-    const headEn = card.type==="vocab" ? card.term : stripSlot(card.frame);
-    const exs = examplesOf(card).slice(0,2);
-    await speak(headEn,"en");        if(!listenState.playing) return; await wait(gap*0.5);
-    await speak(card.jp,"ja");        if(!listenState.playing) return; await wait(gap*0.4);
-    for(const e of exs){
-      await speak(e.en,"en");         if(!listenState.playing) return; await wait(gap*0.7);
-    }
-    if(!listenState.playing) return;
-    if(listenState.idx < listenState.queue.length-1){
-      listenState.idx++; drawListen();
-    }else{
-      listenState.playing=false; drawListen(); return;
-    }
+  if(listenState.idx < listenState.queue.length-1){
+    setTimeout(()=>{ if(listenState.playing){ listenState.idx++; playIdx(); } }, gap);
+  }else{
+    stopListenPlayback(); drawListen();
   }
+}
+
+// 音声ファイルが利用できない時のフォールバック(端末読み上げ)
+async function fallbackSpeak(card, myId){
+  const exs = examplesOf(card).slice(0,2);
+  if(card.type==="vocab"){ await speak(card.term,"en"); if(myId!==curPlayId||!listenState.playing) return; await wait(300); }
+  await speak(card.jp,"ja"); if(myId!==curPlayId||!listenState.playing) return; await wait(250);
+  for(const e of exs){ await speak(e.en,"en"); if(myId!==curPlayId||!listenState.playing) return; await wait(300); }
+  advanceListen();
+}
+
+function setMediaSession(card){
+  if(!("mediaSession" in navigator)) return;
+  const title = card.type==="vocab" ? card.term : card.frame;
+  try{
+    navigator.mediaSession.metadata = new MediaMetadata({ title, artist:card.jp, album:"English Trainer" });
+  }catch(e){}
+  navigator.mediaSession.setActionHandler("play", ()=>{ if(!listenState.playing){ listenState.playing=true; playIdx(); } });
+  navigator.mediaSession.setActionHandler("pause", ()=>{ stopListenPlayback(); drawListen(); });
+  navigator.mediaSession.setActionHandler("nexttrack", ()=> gotoListen(1));
+  navigator.mediaSession.setActionHandler("previoustrack", ()=> gotoListen(-1));
 }
 
 // ============================================================
@@ -448,6 +499,10 @@ function renderSettings(){
       ${[0.8,1.4,2.2].map(g=>`<button class="btn ${s.listenGap===g?'':'sec'} small" data-gap="${g}">${g===0.8?"速い":g===1.4?"標準":"ゆっくり"}</button>`).join("")}
     </div>
 
+    <div class="section-title">オフライン音声</div>
+    <button class="btn sec small" id="prefetch">📥 全音声をこの端末に保存(約19MB)</button>
+    <div class="muted center" id="prefetchMsg" style="margin-top:8px">Wi-Fiで一度保存すれば、圏外・バックグラウンドでも音が流れます。</div>
+
     <div class="section-title">データ</div>
     <button class="btn ghost small" id="export">進捗をバックアップ (書き出し)</button>
     <button class="btn ghost small" id="reset" style="color:#e5484d">進捗をすべてリセット</button>
@@ -459,6 +514,29 @@ function renderSettings(){
   document.getElementById("tgAuto").onclick=()=>{ DB.settings.autoSpeak=!DB.settings.autoSpeak; save(); renderSettings(); };
   document.getElementById("export").onclick=exportData;
   document.getElementById("reset").onclick=()=>{ if(confirm("本当に全ての進捗を消去しますか?")){ localStorage.removeItem(STORE_KEY); DB=load(); go("home"); } };
+  document.getElementById("prefetch").onclick=prefetchAudio;
+}
+
+// 全音声を事前ダウンロード(Service Worker に依頼)
+function prefetchAudio(){
+  const msg = document.getElementById("prefetchMsg");
+  if(!("serviceWorker" in navigator) || !navigator.serviceWorker.controller){
+    msg.textContent = "アプリをホーム画面に追加してから再度お試しください。";
+    return;
+  }
+  msg.textContent = "ダウンロード中… 0%";
+  navigator.serviceWorker.controller.postMessage({ type:"PREFETCH_AUDIO", ids: CARDS.map(c=>c.id) });
+}
+if("serviceWorker" in navigator){
+  navigator.serviceWorker.addEventListener("message", e=>{
+    if(e.data && e.data.type==="PREFETCH_PROGRESS"){
+      const msg = document.getElementById("prefetchMsg");
+      if(msg){
+        const pct = Math.round(e.data.done/e.data.total*100);
+        msg.textContent = e.data.done>=e.data.total ? "✅ 保存完了。オフライン・バックグラウンドで再生できます。" : `ダウンロード中… ${pct}%`;
+      }
+    }
+  });
 }
 function radio(key,val,label){
   const on = DB.settings[key]===val;
