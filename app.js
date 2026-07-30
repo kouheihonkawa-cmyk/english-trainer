@@ -19,6 +19,9 @@ const POS_JP = {
 };
 function posJP(pos){ return POS_JP[pos] || pos || ""; }
 
+// 発音カタカナ / 発音ポイント / 覚え方
+function infoOf(card){ return (typeof INFO !== "undefined") ? INFO[card.id] : null; }
+
 // カードの例文を配列 [{en,jp}, ...] で返す (単語は最大2つ、表現は元の配列)
 function examplesOf(card){
   if(card.type === "expr") return card.examples || [];
@@ -236,11 +239,14 @@ function renderStudy(){
   const isNew = s.state==="new";
   const pct = Math.round((session.done/Math.max(1,session.total))*100);
 
+  const info = infoOf(card);
+  const kanaHtml = info && info.kana ? `<div class="kana">${info.kana}</div>` : "";
+  const tipHtml  = info && info.tip  ? `<div class="tip">🗣 ${info.tip}</div>` : "";
   const front = card.type==="vocab"
     ? `<div class="kicker">${isNew?"新しい単語":"単語"}</div>
-       <div class="term">${card.term}</div><div class="pos">${posJP(card.pos)}</div>`
+       <div class="term">${card.term}</div>${kanaHtml}<div class="pos">${posJP(card.pos)}</div>${tipHtml}`
     : `<div class="kicker">${isNew?"新しい表現":"表現"}</div>
-       <div class="frame">${card.frame}</div>`;
+       <div class="frame">${card.frame}</div>${kanaHtml}${tipHtml}`;
 
   const exList = examplesOf(card);
   let backHtml = "";
@@ -248,11 +254,13 @@ function renderStudy(){
     const exHtml = exList.slice(0,2).map(e=>
       `<div class="ex"><span class="en">${card.type==="vocab"?boldTerm(e.en,card.term):e.en}</span><br><span class="exjp">${e.jp}</span></div>`
     ).join("");
+    const memHtml = info && info.mem ? `<div class="mem">💡 覚え方: ${info.mem}</div>` : "";
     backHtml = `<div class="divider"></div>
          <div class="answer">
            <div class="jp">${card.jp}</div>
            ${exHtml}
            ${card.type==="expr" ? `<div class="note">${card.note}</div>` : ""}
+           ${memHtml}
            <button class="speak" id="sp">🔊</button>
          </div>`;
   }
@@ -386,10 +394,12 @@ function renderListen(){
 
 function drawListen(){
   const card = listenState.queue[listenState.idx];
+  const info = infoOf(card);
+  const kanaHtml = info && info.kana ? `<div class="kana">${info.kana}</div>` : "";
   const head = card.type==="vocab"
-    ? `<div class="term">${card.term}</div><div class="pos">${posJP(card.pos)}</div>
+    ? `<div class="term">${card.term}</div>${kanaHtml}<div class="pos">${posJP(card.pos)}</div>
        <div class="jp">${card.jp}</div>`
-    : `<div class="frame" style="font-size:30px">${card.frame}</div>
+    : `<div class="frame" style="font-size:30px">${card.frame}</div>${kanaHtml}
        <div class="jp">${card.jp}</div>`;
   const exHtml = examplesOf(card).slice(0,2).map(e=>
     `<div class="ex">${card.type==="vocab"?boldTerm(e.en,card.term):e.en}<br><span class="exjp">${e.jp}</span></div>`
