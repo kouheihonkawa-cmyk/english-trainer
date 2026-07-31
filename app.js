@@ -49,6 +49,43 @@ function load(){
 }
 function save(){ localStorage.setItem(STORE_KEY, JSON.stringify(DB)); }
 
+// ---- 学習セッションの保存/復元(閉じても続きから) ----
+const SESSION_KEY = "eng_session_v1";
+function saveSession(){
+  if(!session){ localStorage.removeItem(SESSION_KEY); return; }
+  try{
+    localStorage.setItem(SESSION_KEY, JSON.stringify({
+      date: todayStr(), mode: session.mode,
+      queueIds: session.queue.map(c=>c.id), idx: session.idx,
+      done: session.done, total: session.total,
+      againIds: session.again.map(c=>c.id),
+    }));
+  }catch(e){}
+}
+function loadSession(){
+  try{
+    const s = JSON.parse(localStorage.getItem(SESSION_KEY));
+    if(!s || s.date !== todayStr()) return null;
+    const queue = (s.queueIds||[]).map(id=>CARD_BY_ID[id]).filter(Boolean);
+    const again = (s.againIds||[]).map(id=>CARD_BY_ID[id]).filter(Boolean);
+    if(s.idx >= queue.length && again.length===0) return null; // 完了済み
+    return { queue, idx:s.idx, total:s.total||queue.length, revealed:false, mode:s.mode||"normal", done:s.done||0, again };
+  }catch(e){ return null; }
+}
+function sessionRemaining(){
+  if(!session) return 0;
+  return Math.max(0, session.queue.length - session.idx) + session.again.length;
+}
+
+// ---- 今日の学習回数カウント ----
+function bumpTodayCount(){
+  if(!DB.stats.today || DB.stats.today.date !== todayStr()){
+    DB.stats.today = { date: todayStr(), n: 0 };
+  }
+  DB.stats.today.n += 1;
+}
+function todayCount(){ return (DB.stats.today && DB.stats.today.date===todayStr()) ? DB.stats.today.n : 0; }
+
 function stateOf(id){
   if(!DB.states[id]) DB.states[id] = newCardState(id);
   return DB.states[id];
@@ -174,33 +211,61 @@ function render(){
   else if(VIEW==="settings") renderSettings();
 }
 
-// ---------- ホーム ----------
+// ---------- ホーム(ダッシュボード) ----------
 function renderHome(){
   const q = buildQueue();
-  const p = progressCounts();
+  const p = progressCounts();                 // learned, learning, retired, total
+  const notStarted = Math.max(0, p.total - p.learned - p.learning - p.retired);
+  const started = p.total - notStarted;
   const streak = DB.stats.streak || 0;
+  const introduced = DB.introducedToday.ids.length;
+  const doneToday = todayCount();
+  const resuming = session && sessionRemaining()>0;
+  const remaining = resuming ? sessionRemaining() : q.total;
+
+  // 今日の目標に対する進み具合
+  const todayGoal = Math.max(1, doneToday + q.total);
+  const todayPct = Math.round(doneToday / todayGoal * 100);
+
+  // 全体の内訳バー
+  const seg = (n,cls)=> n>0 ? `<i class="${cls}" style="width:${(n/p.total*100).toFixed(1)}%"></i>` : "";
+
+  // メインボタンの文言
+  let mainLabel, mainAction;
+  if(resuming){ mainLabel = `▶ 学習を再開(残り ${remaining} 枚)`; mainAction = ()=>go("study"); }
+  else if(q.total>0){ mainLabel = `学習を始める(${q.total} 枚)`; mainAction = ()=>startSession("normal"); }
+  else { mainLabel = "🔁 復習を続ける"; mainAction = ()=>startSession("cram"); }
+
   app.innerHTML = `
-    <div class="stats">
-      <div class="stat due"><div class="num">${q.due.length}</div><div class="lbl">復習の期限</div></div>
-      <div class="stat new"><div class="num">${q.fresh.length}</div><div class="lbl">今日の新規</div></div>
-      <div class="stat"><div class="num">${streak}</div><div class="lbl">連続日数</div></div>
+    <div class="today">
+      <div class="today-top">
+        <div><div class="today-big">${doneToday}<span>枚</span></div><div class="lbl">今日 学習した</div></div>
+        <div class="today-right">
+          <div>🔥 連続 <b>${streak}</b> 日</div>
+          <div>➕ 今日追加 <b>${introduced}</b> 語</div>
+        </div>
+      </div>
+      <div class="tprog"><i style="width:${resuming||q.total>0?todayPct:100}%"></i></div>
+      <div class="lbl">${q.total>0 ? `今日の残り ${q.total} 枚(復習 ${q.due.length}・新規 ${q.fresh.length})` : "今日のぶんは完了しました 🎉"}</div>
     </div>
 
-    <button class="btn" id="startStudy">${q.total>0 ? `学習を始める (${q.total}枚)` : "今日のノルマ完了 🎉"}</button>
+    <button class="btn" id="mainBtn">${mainLabel}</button>
     <div class="row">
       <button class="btn sec small" id="startListen">🎧 聞き流し</button>
       <button class="btn sec small" id="cram">🔁 総復習</button>
     </div>
 
-    <div class="section-title">進捗</div>
-    <div class="stats">
-      <div class="stat"><div class="num">${p.learned}</div><div class="lbl">定着</div></div>
-      <div class="stat"><div class="num">${p.learning}</div><div class="lbl">学習中</div></div>
-      <div class="stat"><div class="num">${p.retired}</div><div class="lbl">習得済み</div></div>
+    <div class="section-title">全体の進み具合</div>
+    <div class="pbar">${seg(p.retired,'s-ret')}${seg(p.learned,'s-lrn')}${seg(p.learning,'s-ing')}${seg(notStarted,'s-new')}</div>
+    <div class="legend">
+      <span><i class="s-ret"></i>習得済み ${p.retired}</span>
+      <span><i class="s-lrn"></i>定着 ${p.learned}</span>
+      <span><i class="s-ing"></i>学習中 ${p.learning}</span>
+      <span><i class="s-new"></i>未学習 ${notStarted}</span>
     </div>
-    <div class="muted center" style="margin-top:14px">全 ${p.total} 枚中 ${p.total-(CARDS.filter(c=>{const s=DB.states[c.id];return !s||s.state==='new'}).length)} 枚に着手</div>
+    <div class="muted center" style="margin-top:12px">全 ${p.total} 語のうち <b>${started}</b> 語に着手 / 累計 ${DB.stats.totalReviews||0} 回</div>
   `;
-  document.getElementById("startStudy").onclick = ()=> startSession(q.total>0 ? "normal" : "empty");
+  document.getElementById("mainBtn").onclick = mainAction;
   document.getElementById("startListen").onclick = ()=> go("listen");
   document.getElementById("cram").onclick = ()=> startSession("cram");
 }
@@ -220,7 +285,14 @@ function startSession(mode){
     queue = [...q.due, ...q.fresh];
   }
   session = { queue, idx:0, total:queue.length, revealed:false, mode, done:0, again:[] };
+  saveSession();
   go("study");
+}
+
+// 進行中のセッションがあれば続きから、なければ新規開始
+function studyOrResume(){
+  if(session && sessionRemaining()>0){ go("study"); }
+  else startSession("normal");
 }
 
 function renderStudy(){
@@ -315,12 +387,15 @@ function grade(card, g){
   const updated = schedule(st, g);
   DB.states[card.id] = updated;
   DB.stats.totalReviews = (DB.stats.totalReviews||0)+1;
+  bumpTodayCount();
   // 新規カードのみ「今日の新規」枠として記録
   if(wasNew && !DB.introducedToday.ids.includes(card.id)){
     DB.introducedToday.ids.push(card.id);
   }
   markStreak();
   save();
+  // 選んだ結果を一瞬フィードバック(次にいつ出るか)
+  toast(g===0 ? "🔁 すぐにもう一度出します" : `✓ 次は ${nextText(updated)}`);
   // 忘れた→同セッションで再出
   if(g===0) session.again.push(card);
   else session.done++;
@@ -330,6 +405,7 @@ function grade(card, g){
 function advance(){
   session.idx++;
   session.revealed=false;
+  saveSession();
   renderStudy();
 }
 
@@ -348,6 +424,7 @@ function renderDone(){
   const m=document.getElementById("more"); if(m) m.onclick=()=>startSession("normal");
   document.getElementById("home2").onclick=()=>go("home");
   session=null;
+  saveSession();
 }
 
 function markStreak(){
@@ -570,9 +647,17 @@ function boldTerm(sentence, term){
 function stripSlot(frame){ return frame.replace(/~/g,"blank").replace(/\?/g,""); }
 function shuffle(a){ for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; } }
 
+// 一瞬だけ出るフィードバック表示
+function toast(msg){
+  let t=document.getElementById("toast");
+  if(!t){ t=document.createElement("div"); t.id="toast"; document.body.appendChild(t); }
+  t.textContent=msg; t.classList.add("show");
+  clearTimeout(t._t); t._t=setTimeout(()=>t.classList.remove("show"), 1500);
+}
+
 // ---- ナビ ----
 document.querySelectorAll("nav button").forEach(b=> b.onclick=()=>{
-  if(b.dataset.v==="study"){ startSession("normal"); }  // 学習タブは直接セッション開始
+  if(b.dataset.v==="study"){ studyOrResume(); }  // 続きがあれば再開
   else go(b.dataset.v);
 });
 
@@ -584,4 +669,11 @@ document.addEventListener("click",()=>{
   }
 },{once:true});
 
+// 閉じる/バックグラウンド時に確実に保存
+["visibilitychange","pagehide"].forEach(ev=>
+  document.addEventListener(ev, ()=>{ save(); saveSession(); })
+);
+
+// 起動時に前回の続きを復元
+session = loadSession();
 go("home");
