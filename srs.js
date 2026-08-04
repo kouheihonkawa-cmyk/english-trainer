@@ -37,32 +37,33 @@ function schedule(card, grade) {
 
   // あやふや/覚えた/完璧
   if (c.state === "new" || c.state === "learning") {
-    // 学習ステップ: 0日 → 1日 → 卒業
     if (grade === 1) {
+      // あやふや → 同じ日のうちにもう一度
       c.interval = 0;
       c.due = now + 5 * 60 * 1000; // 5分後
       c.state = "learning";
       return c;
     }
+    // 覚えた/完璧 → 「数日後」に必ず再チェック(覚え違いを防ぐ)。すぐには卒業させない
     c.reps += 1;
     if (c.reps === 1) {
-      c.interval = 1;               // 明日 (もう"新規"ではない)
-      c.state = "learning";
+      c.interval = grade === 3 ? 3 : 2;  // 完璧=3日後 / 覚えた=2日後
+      c.state = "learning";              // もう一度確認するまで卒業しない
     } else {
-      c.interval = grade === 3 ? 4 : 3; // 卒業
+      c.interval = grade === 3 ? 6 : 4;  // さらに数日後 → 復習フェーズへ
       c.state = "review";
     }
     c.due = now + c.interval * DAY;
     return c;
   }
 
-  // review 状態: 通常のSM-2更新
+  // review 状態: 間隔を伸ばす(「覚えた」は控えめに伸ばして再確認を多めに)
   c.reps += 1;
-  const factor = grade === 1 ? 1.2 : grade === 3 ? c.ease * 1.3 : c.ease;
-  c.interval = Math.max(1, Math.round(c.interval * factor));
+  const factor = grade === 1 ? 1.3 : grade === 3 ? c.ease : c.ease * 0.8;
+  c.interval = Math.min(180, Math.max(2, Math.round(c.interval * factor))); // 最長でも半年で必ず再確認
   // ease調整
   if (grade === 1) c.ease = Math.max(1.3, c.ease - 0.15);
-  else if (grade === 3) c.ease = c.ease + 0.15;
+  else if (grade === 3) c.ease = c.ease + 0.1;
   c.due = now + c.interval * DAY;
   c.state = "review";
   return c;
