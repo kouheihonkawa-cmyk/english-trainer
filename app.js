@@ -459,22 +459,32 @@ function markStreak(){
 }
 
 // ============================================================
-//  聞き流しモード (音声ファイル + バックグラウンド/ロック画面再生)
-//  ※ 音声ファイルが無い時は端末読み上げにフォールバック(背景再生不可)
+//  聞き流しモード (複数音声を1本に連結して連続再生)
+//  → 再生中にソースを切り替えないので、画面オフ・他アプリ中でも止まらない
 // ============================================================
-let listenState = { queue:[], idx:0, playing:false };
+let listenState = { queue:[], idx:0, playing:false, offsets:[], url:null, ready:false, building:false };
 let listenAudio = null;
-let curPlayId = 0;      // next/prev や停止で古い再生を無効化
+let _actx = null;
+let assembleToken = 0;
 
 function getAudioEl(){
-  if(!listenAudio){ listenAudio = new Audio(); listenAudio.preload = "auto"; }
+  if(!listenAudio){
+    listenAudio = new Audio();
+    listenAudio.preload = "auto";
+    listenAudio.ontimeupdate = onListenTime;
+    listenAudio.onended = ()=>{ if(listenState.ready){ stopListenPlayback(); if(VIEW==="listen") drawListen(); } };
+  }
   return listenAudio;
+}
+function getAudioCtx(){
+  if(!_actx){ const C = window.AudioContext||window.webkitAudioContext; if(C){ try{ _actx = new C(); }catch(e){} } }
+  if(_actx && _actx.state==="suspended"){ _actx.resume().catch(()=>{}); }
+  return _actx;
 }
 function audioSrc(id){ return "audio/" + id + ".mp3"; }
 
 function stopListenPlayback(){
   listenState.playing = false;
-  curPlayId++;
   if(listenAudio) listenAudio.pause();
   stopSpeak();
   if("mediaSession" in navigator) navigator.mediaSession.playbackState = "paused";
@@ -488,7 +498,9 @@ function renderListen(){
     queue = queue.concat(extra).slice(0, Math.max(queue.length, 20));
   }
   if(queue.length===0) queue = CARDS.slice(0,20);
-  listenState = { queue, idx:0, playing:false };
+  queue = queue.slice(0, 40); // 連結は重いので最大40枚
+  if(listenState.url){ try{URL.revokeObjectURL(listenState.url);}catch(e){} }
+  listenState = { queue, idx:0, playing:false, offsets:[], url:null, ready:false, building:false };
   drawListen();
 }
 
@@ -504,6 +516,9 @@ function drawListen(){
   const exHtml = examplesOf(card).slice(0,2).map(e=>
     `<div class="ex">${card.type==="vocab"?boldTerm(e.en,card.term):e.en}<br><span class="exjp">${e.jp}</span></div>`
   ).join("");
+  const status = listenState.building
+    ? `<div class="muted" style="font-size:12px">⏳ 音声を準備中…(初回のみ少し待ちます)</div>`
+    : `<div class="muted" style="font-size:12px;max-width:300px">🔒 画面を消しても・他アプリ中でも再生が続きます。</div>`;
   app.innerHTML = `
     <div class="listen">
       ${head}${exHtml}
@@ -513,7 +528,7 @@ function drawListen(){
         <button class="lc" id="next">⏭</button>
       </div>
       <div class="muted" style="margin-top:16px">${listenState.idx+1} / ${listenState.queue.length}</div>
-      <div class="muted" style="font-size:12px;max-width:300px">🔒 画面を消しても・他アプリ中でも再生が続きます。ロック画面で操作できます。</div>
+      ${status}
     </div>`;
   document.getElementById("play").onclick = toggleListen;
   document.getElementById("next").onclick = ()=> gotoListen(1);
@@ -521,55 +536,116 @@ function drawListen(){
 }
 
 function toggleListen(){
-  if(listenState.playing){
-    stopListenPlayback();
+  if(listenState.playing){ stopListenPlayback(); drawListen(); return; }
+  listenState.playing = true;
+  const a = getAudioEl();
+  setMediaSession(listenState.queue[listenState.idx]);
+  if("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
+  if(listenState.ready && listenState.url){
+    if(a.src !== listenState.url) a.src = listenState.url;
+    try{ a.currentTime = listenState.offsets[listenState.idx] || 0; }catch(e){}
+    a.play().catch(()=>{});
     drawListen();
   }else{
-    listenState.playing = true;
-    playIdx();
+    // 初回: ユーザー操作の瞬間に1語目を同期再生してロックを解除 → 裏で全部を連結して差し替え
+    a.src = audioSrc(listenState.queue[listenState.idx].id);
+    a.currentTime = 0;
+    a.play().catch(()=>{ if(listenState.playing) fallbackSpeakLoop(); });
+    drawListen();
+    assembleAndPlay();
   }
 }
 
+async function assembleAndPlay(){
+  const token = ++assembleToken;
+  listenState.building = true;
+  if(VIEW==="listen") drawListen();
+  try{
+    const ctx = getAudioCtx();
+    const cards = listenState.queue;
+    const parts = [], offsets = [];
+    let t = 0;
+    for(let i=0;i<cards.length;i++){
+      const ab = await fetchArrayBuffer(audioSrc(cards[i].id));
+      if(token!==assembleToken) return;
+      parts.push(new Uint8Array(ab.slice(0)));
+      offsets.push(t);
+      let dur = 0;
+      if(ctx){ dur = await decodeDuration(ctx, ab); }
+      t += (dur || 6);
+    }
+    if(token!==assembleToken) return;
+    const url = URL.createObjectURL(new Blob(parts, { type:"audio/mpeg" }));
+    if(listenState.url){ try{URL.revokeObjectURL(listenState.url);}catch(e){} }
+    listenState.url = url;
+    listenState.offsets = offsets;
+    listenState.ready = true;
+    listenState.building = false;
+    if(!listenState.playing){ if(VIEW==="listen") drawListen(); return; }
+    const a = getAudioEl();
+    const resumeAt = offsets[listenState.idx] || 0;
+    a.src = url;
+    await new Promise(res=>{ a.onloadedmetadata=()=>res(); setTimeout(res, 1500); });
+    try{ a.currentTime = resumeAt; }catch(e){}
+    a.play().catch(()=>{});
+    if(VIEW==="listen") drawListen();
+  }catch(e){
+    listenState.building = false;
+    if(VIEW==="listen") drawListen();
+    if(listenState.playing) fallbackSpeakLoop(); // 連結失敗(未保存でオフライン等)→逐次読み上げ
+  }
+}
+
+// 連続再生中、再生位置から今どのカードかを判定して表示を更新
+function onListenTime(){
+  if(!listenState.ready || !listenState.offsets.length) return;
+  const ct = listenAudio.currentTime, offs = listenState.offsets;
+  let idx = offs.length-1;
+  for(let i=0;i<offs.length;i++){ if(ct < (offs[i+1] ?? Infinity)){ idx=i; break; } }
+  if(idx !== listenState.idx){
+    listenState.idx = idx;
+    setMediaSession(listenState.queue[idx]);
+    if(VIEW==="listen") drawListen();
+  }
+}
+
+// 前へ/次へ: ソースは変えず、連結音声の中で再生位置を移動(=画面オフでも継続)
 function gotoListen(delta){
-  if(listenAudio) listenAudio.pause();
-  stopSpeak();
-  curPlayId++;
-  listenState.idx = Math.min(listenState.queue.length-1, Math.max(0, listenState.idx+delta));
-  drawListen();
-  if(listenState.playing) playIdx();
-}
-
-function playIdx(){
-  const card = listenState.queue[listenState.idx];
-  const myId = ++curPlayId;
-  drawListen();
-  setMediaSession(card);
-  if("mediaSession" in navigator) navigator.mediaSession.playbackState = "playing";
-  const a = getAudioEl();
-  a.onended = ()=>{ if(myId!==curPlayId || !listenState.playing) return; advanceListen(); };
-  a.onerror = ()=>{ if(myId!==curPlayId || !listenState.playing) return; fallbackSpeak(card, myId); };
-  a.src = audioSrc(card.id);
-  a.currentTime = 0;
-  const p = a.play();
-  if(p && p.catch) p.catch(()=>{ if(myId!==curPlayId || !listenState.playing) return; fallbackSpeak(card, myId); });
-}
-
-function advanceListen(){
-  const gap = (DB.settings.listenGap||1.4)*1000;
-  if(listenState.idx < listenState.queue.length-1){
-    setTimeout(()=>{ if(listenState.playing){ listenState.idx++; playIdx(); } }, gap);
-  }else{
-    stopListenPlayback(); drawListen();
+  const ni = Math.min(listenState.queue.length-1, Math.max(0, listenState.idx+delta));
+  listenState.idx = ni;
+  setMediaSession(listenState.queue[ni]);
+  if(listenState.ready && listenAudio && listenState.url){
+    try{ listenAudio.currentTime = listenState.offsets[ni] || 0; }catch(e){}
   }
+  if(VIEW==="listen") drawListen();
 }
 
-// 音声ファイルが利用できない時のフォールバック(端末読み上げ)
-async function fallbackSpeak(card, myId){
-  const exs = examplesOf(card).slice(0,2);
-  if(card.type==="vocab"){ await speak(card.term,"en"); if(myId!==curPlayId||!listenState.playing) return; await wait(300); }
-  await speak(card.jp,"ja"); if(myId!==curPlayId||!listenState.playing) return; await wait(250);
-  for(const e of exs){ await speak(e.en,"en"); if(myId!==curPlayId||!listenState.playing) return; await wait(300); }
-  advanceListen();
+async function fetchArrayBuffer(url){
+  const r = await fetch(url);
+  if(!r.ok) throw new Error("audio not available");
+  return await r.arrayBuffer();
+}
+function decodeDuration(ctx, ab){
+  return new Promise(res=>{
+    try{ ctx.decodeAudioData(ab, b=>res(b.duration), ()=>res(0)); }
+    catch(e){ res(0); }
+  });
+}
+
+// フォールバック: 連結できないとき端末読み上げ(画面オフでは止まります)
+let fbToken = 0;
+async function fallbackSpeakLoop(){
+  const my = ++fbToken;
+  const gap = (DB.settings.listenGap||1.4)*1000;
+  while(listenState.playing && listenState.idx < listenState.queue.length && my===fbToken){
+    const card = listenState.queue[listenState.idx];
+    setMediaSession(card);
+    if(card.type==="vocab"){ await speak(card.term,"en"); if(my!==fbToken||!listenState.playing) return; await wait(gap*0.4); }
+    await speak(card.jp,"ja"); if(my!==fbToken||!listenState.playing) return; await wait(gap*0.3);
+    for(const e of examplesOf(card).slice(0,2)){ await speak(e.en,"en"); if(my!==fbToken||!listenState.playing) return; await wait(gap*0.5); }
+    if(listenState.idx < listenState.queue.length-1){ listenState.idx++; if(VIEW==="listen") drawListen(); }
+    else { stopListenPlayback(); if(VIEW==="listen") drawListen(); return; }
+  }
 }
 
 function setMediaSession(card){
@@ -578,8 +654,8 @@ function setMediaSession(card){
   try{
     navigator.mediaSession.metadata = new MediaMetadata({ title, artist:card.jp, album:"English Trainer" });
   }catch(e){}
-  navigator.mediaSession.setActionHandler("play", ()=>{ if(!listenState.playing){ listenState.playing=true; playIdx(); } });
-  navigator.mediaSession.setActionHandler("pause", ()=>{ stopListenPlayback(); drawListen(); });
+  navigator.mediaSession.setActionHandler("play", ()=>{ if(!listenState.playing) toggleListen(); });
+  navigator.mediaSession.setActionHandler("pause", ()=>{ stopListenPlayback(); if(VIEW==="listen") drawListen(); });
   navigator.mediaSession.setActionHandler("nexttrack", ()=> gotoListen(1));
   navigator.mediaSession.setActionHandler("previoustrack", ()=> gotoListen(-1));
 }
