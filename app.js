@@ -130,8 +130,12 @@ function buildQueue(){
 
 function orderedNewPool(){
   const notStarted = CARDS.filter(c => { const s=DB.states[c.id]; return !s || s.state==="new"; });
-  const vocab = notStarted.filter(c=>c.type==="vocab");
-  const expr  = notStarted.filter(c=>c.type==="expr");
+  // 頻出優先: 頻度ティア昇順(同ティア内は元の順を保つ安定ソート)
+  const byFreq = arr => arr.map((c,i)=>[c,i])
+    .sort((a,b)=> (freqTier(a[0].id)-freqTier(b[0].id)) || (a[1]-b[1]))
+    .map(x=>x[0]);
+  const vocab = byFreq(notStarted.filter(c=>c.type==="vocab"));
+  const expr  = notStarted.filter(c=>c.type==="expr"); // 表現はどれも日常頻出
   if(DB.settings.order === "vocab") return [...vocab, ...expr];
   if(DB.settings.order === "expr")  return [...expr, ...vocab];
   return interleave(vocab, expr); // mix = 単語と表現を毎日バランスよく混ぜる
@@ -311,30 +315,48 @@ function renderStudy(){
   const isNew = s.state==="new";
   const pct = Math.round((session.done/Math.max(1,session.total))*100);
 
+  // 出題方向を決定(初回は英→日で認識、以降はランダムで日→英も混ぜる)
+  if(session._dirIdx !== session.idx){
+    session._dirIdx = session.idx;
+    session.dir = isNew ? "en2jp" : (Math.random()<0.5 ? "jp2en" : "en2jp");
+  }
+  const dir = session.dir;
+
   const info = infoOf(card);
   const kanaHtml = info && info.kana ? `<div class="kana">${info.kana}</div>` : "";
   const tipHtml  = info && info.tip  ? `<div class="tip">🗣 ${info.tip}</div>` : "";
-  const front = card.type==="vocab"
-    ? `<div class="kicker">${isNew?"新しい単語":"単語"}</div>
-       <div class="term">${card.term}</div>${kanaHtml}<div class="pos">${posJP(card.pos)}</div>${tipHtml}`
-    : `<div class="kicker">${isNew?"新しい表現":"表現"}</div>
-       <div class="frame">${card.frame}</div>${kanaHtml}${tipHtml}`;
-
   const exList = examplesOf(card);
-  let backHtml = "";
-  if(session.revealed){
-    const exHtml = exList.slice(0,2).map(e=>
-      `<div class="ex"><span class="en">${card.type==="vocab"?boldTerm(e.en,card.term):e.en}</span><br><span class="exjp">${e.jp}</span></div>`
-    ).join("");
-    const memHtml = info && info.mem ? `<div class="mem">💡 覚え方: ${info.mem}</div>` : "";
-    backHtml = `<div class="divider"></div>
-         <div class="answer">
-           <div class="jp">${card.jp}</div>
-           ${exHtml}
-           ${card.type==="expr" ? `<div class="note">${card.note}</div>` : ""}
-           ${memHtml}
-           <button class="speak" id="sp">🔊</button>
-         </div>`;
+  const exHtml = exList.slice(0,2).map(e=>
+    `<div class="ex"><span class="en">${card.type==="vocab"?boldTerm(e.en,card.term):e.en}</span><br><span class="exjp">${e.jp}</span></div>`
+  ).join("");
+  const memHtml = info && info.mem ? `<div class="mem">💡 覚え方: ${info.mem}</div>` : "";
+  const noteHtml = card.type==="expr" ? `<div class="note">${card.note}</div>` : "";
+  // 英語側(答え or 問題)の表示
+  const engBlock = card.type==="vocab"
+    ? `<div class="term">${card.term}</div>${kanaHtml}<div class="pos">${posJP(card.pos)}</div>${tipHtml}`
+    : `<div class="frame">${card.frame}</div>${kanaHtml}${tipHtml}`;
+
+  let front, backHtml = "";
+  if(dir==="jp2en"){
+    // 日本語 → 英語(産出練習)
+    front = `<div class="kicker">${card.type==="vocab"?"日本語 → 英語":"日本語 → 英語の型"}</div>
+       <div class="q-jp">${card.jp}</div>
+       <div class="tip">${card.type==="vocab"?"英語では?" : "どんな型で言う?"}</div>`;
+    if(session.revealed){
+      backHtml = `<div class="divider"></div><div class="answer">
+           ${engBlock}${exHtml}${noteHtml}${memHtml}
+           <button class="speak" id="sp">🔊</button></div>`;
+    }
+  }else{
+    // 英語 → 日本語(認識)
+    front = card.type==="vocab"
+      ? `<div class="kicker">${isNew?"新しい単語":"単語"}</div>${engBlock}`
+      : `<div class="kicker">${isNew?"新しい表現":"表現"}</div>${engBlock}`;
+    if(session.revealed){
+      backHtml = `<div class="divider"></div><div class="answer">
+           <div class="jp">${card.jp}</div>${exHtml}${noteHtml}${memHtml}
+           <button class="speak" id="sp">🔊</button></div>`;
+    }
   }
 
   app.innerHTML = `
@@ -354,16 +376,17 @@ function renderStudy(){
     </div>
   `;
 
-  // 表向きで自動読み上げ
-  if(DB.settings.autoSpeak && !session.revealed){
+  // 表向きで自動読み上げ(英→日のときだけ。日→英は答えを隠すため鳴らさない)
+  if(DB.settings.autoSpeak && !session.revealed && dir==="en2jp"){
     speak(card.type==="vocab"?card.term:stripSlot(card.frame), "en");
   }
 
   if(!session.revealed){
-    document.getElementById("reveal").onclick = ()=>{ session.revealed=true; renderStudy();
-      // 答え表示時に例文(1つ目)を読む
-      if(DB.settings.autoSpeak && exList[0]){
-        speak(exList[0].en,"en");
+    document.getElementById("reveal").onclick = async ()=>{ session.revealed=true; renderStudy();
+      // 答え表示時に読み上げ。日→英は答えの英語も読む
+      if(DB.settings.autoSpeak){
+        if(dir==="jp2en"){ await speak(card.type==="vocab"?card.term:stripSlot(card.frame),"en"); await wait(400); }
+        if(exList[0]) speak(exList[0].en,"en");
       }
     };
   }else{
